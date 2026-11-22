@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Star Ghost — a tiny game built from one prompt</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin: 0; background: #0f0f2a; display: grid; place-items: center; min-height: 100vh; font-family: system-ui, sans-serif; }
+  #wrap { text-align: center; }
+  canvas { background: #14143a; border: 3px solid #ff2e88; border-radius: 12px; max-width: 96vw; }
+  p { color: #cfcfe8; font-size: 14px; margin: 10px 0 0; }
+  p b { color: #ffd166; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <p>Move with <b>arrow keys / WASD</b> &middot; collect stars <b>+10</b> &middot; dodge the bats &middot; 3 lives, 60 seconds &middot; press <b>R</b> to restart &middot; press <b>D</b> for autopilot demo</p>
+</div>
+<script>
+'use strict';
+// Star Ghost — built from one prompt:
+// "Build me a tiny browser game: a little ghost collects stars and dodges bats.
+//  Arrow keys to move. 60 seconds on the clock. 3 lives."
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 960, H = 540;
+
+// Deterministic RNG (mulberry32) so the demo replay is identical every run.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const state = {
+  ghost: { x: W / 2, y: H / 2, r: 22, vx: 0, vy: 0 },
+  stars: [], bats: [],
+  score: 0, lives: 3, timeLeft: 60,
+  starTimer: 0, batTimer: 0, invuln: 0,
+  over: false, won: false, demo: false,
+  rng: mulberry32(20261123),
+  keys: {},
+  twinkles: [],
+};
+for (let i = 0; i < 70; i++) {
+  state.twinkles.push({ x: state.rng() * W, y: state.rng() * H * 0.7, r: state.rng() * 1.6 + 0.6, p: state.rng() * 6.28 });
+}
+
+function spawnStar() {
+  if (state.stars.length >= 6) return;
+  state.stars.push({
+    x: 40 + state.rng() * (W - 80),
+    y: 70 + state.rng() * (H - 140),
+    r: 12, bob: state.rng() * 6.28, taken: false,
+  });
+}
+function spawnBat() {
+  if (state.bats.length >= 5) return;
+  const fromLeft = state.rng() < 0.5;
+  state.bats.push({
+    x: fromLeft ? -40 : W + 40,
+    y: 60 + state.rng() * (H - 160),
+    vx: (fromLeft ? 1 : -1) * (120 + state.rng() * 90),
+    wobble: state.rng() * 6.28, wobbleSpeed: 2 + state.rng() * 2,
+    flap: state.rng() * 6.28,
+  });
+}
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+// Autopilot: chase the nearest star, swerve away from close bats.
+function autopilot(dt) {
+  const g = state.ghost;
+  let tx = g.x, ty = g.y;
+  let best = Infinity;
+  for (const s of state.stars) {
+    const d = dist(g, s);
+    if (d < best) { best = d; tx = s.x; ty = s.y; }
+  }
+  let ax = tx - g.x, ay = ty - g.y;
+  const len = Math.hypot(ax, ay) || 1;
+  ax /= len; ay /= len;
+  for (const b of state.bats) {
+    const d = dist(g, b);
+    if (d < 150) {
+      const push = (150 - d) / 150;
+      ax += ((g.x - b.x) / (d || 1)) * push * 1.6;
+      ay += ((g.y - b.y) / (d || 1)) * push * 1.6;
+    }
+  }
+  const n = Math.hypot(ax, ay) || 1;
+  g.vx = (ax / n) * 260; g.vy = (ay / n) * 260;
+  g.x += g.vx * dt; g.y += g.vy * dt;
+}
+
+function update(dt) {
+  if (state.over) return;
+  state.timeLeft -= dt;
+  if (state.timeLeft <= 0) { state.timeLeft = 0; state.over = true; state.won = state.score >= 50; }
+  const g = state.ghost;
+  if (state.demo) {
+    autopilot(dt);
+  } else {
+    const speed = 280;
+    let mx = 0, my = 0;
+    if (state.keys.ArrowLeft || state.keys.a) mx -= 1;
+    if (state.keys.ArrowRight || state.keys.d) mx += 1;
+    if (state.keys.ArrowUp || state.keys.w) my -= 1;
+    if (state.keys.ArrowDown || state.keys.s) my += 1;
+    const m = Math.hypot(mx, my) || 1;
+    g.x += (mx / m) * speed * dt;
+    g.y += (my / m) * speed * dt;
+  }
+  g.x = Math.max(g.r, Math.min(W - g.r, g.x));
+  g.y = Math.max(g.r + 40, Math.min(H - g.r, g.y));
+  if (state.invuln > 0) state.invuln -= dt;
+
+  state.starTimer -= dt;
+  if (state.starTimer <= 0) { spawnStar(); state.starTimer = 0.9; }
+  state.batTimer -= dt;
+  if (state.batTimer <= 0) { spawnBat(); state.batTimer = 1.7; }
+
+  for (const s of state.stars) s.bob += dt * 2;
+  for (const s of state.stars) {
+    if (!s.taken && dist(g, s) < g.r + s.r) { s.taken = true; state.score += 10; }
+  }
+  state.stars = state.stars.filter(s => !s.taken);
+
+  for (const b of state.bats) {
+    b.x += b.vx * dt;
+    b.y += Math.sin(b.wobble += b.wobbleSpeed * dt) * 30 * dt;
+    b.flap += dt * 14;
+    if (state.invuln <= 0 && dist(g, b) < g.r + 18) {
+      state.lives -= 1;
+      state.invuln = 1.2;
+      if (state.lives <= 0) { state.over = true; state.won = false; }
+    }
+  }
+  state.bats = state.bats.filter(b => b.x > -80 && b.x < W + 80);
+}
+
+function drawStar(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = -Math.PI / 2 + i * Math.PI / 5;
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const px = x + Math.cos(ang) * rr, py = y + Math.sin(ang) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.fill();
+}
+function drawGhost(x, y, r, t) {
+  const bob = Math.sin(t * 3) * 3;
+  ctx.fillStyle = '#f4f6ff';
+  ctx.beginPath();
+  ctx.arc(x, y + bob - r * 0.25, r, Math.PI, 0);
+  ctx.lineTo(x + r, y + bob + r * 0.7);
+  for (let i = 0; i < 3; i++) {
+    const cx = x + r - (i + 0.5) * (2 * r / 3);
+    ctx.quadraticCurveTo(cx - r / 6, y + bob + r * 0.95, cx - r / 3, y + bob + r * 0.7);
+  }
+  ctx.lineTo(x - r, y + bob - r * 0.25);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#14143a';
+  ctx.beginPath(); ctx.arc(x - r * 0.35, y + bob - r * 0.3, r * 0.16, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r * 0.35, y + bob - r * 0.3, r * 0.16, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x, y + bob - r * 0.05, r * 0.1, r * 0.16, 0, 0, 6.29); ctx.fill();
+}
+function drawBat(x, y, flap) {
+  ctx.fillStyle = '#7b5cff';
+  const w = Math.sin(flap) * 14;
+  ctx.beginPath();
+  ctx.ellipse(x - 16, y - w * 0.4, 18, 8, -0.5, 0, 6.29); ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 16, y - w * 0.4, 18, 8, 0.5, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x, y, 15, 11, 0, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#ff5c5c';
+  ctx.beginPath(); ctx.arc(x - 5, y - 3, 2.5, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 5, y - 3, 2.5, 0, 6.29); ctx.fill();
+}
+
+function draw(t) {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#14143a'); grad.addColorStop(1, '#241a4d');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  for (const tw of state.twinkles) {
+    ctx.globalAlpha = 0.4 + 0.6 * Math.abs(Math.sin(t + tw.p));
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(tw.x, tw.y, tw.r, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#2c2358'; ctx.fillRect(0, H - 26, W, 26);
+  for (const s of state.stars) drawStar(s.x, s.y + Math.sin(s.bob) * 4, s.r, '#ffd166');
+  for (const b of state.bats) drawBat(b.x, b.y, b.flap);
+  if (state.invuln <= 0 || Math.floor(t * 8) % 2 === 0) drawGhost(state.ghost.x, state.ghost.y, state.ghost.r, t);
+
+  ctx.fillStyle = 'rgba(10, 10, 30, 0.85)'; ctx.fillRect(0, 0, W, 44);
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left'; ctx.fillText('SCORE  ' + state.score, 16, 23);
+  ctx.textAlign = 'center'; ctx.fillText('TIME  ' + Math.ceil(state.timeLeft) + 's', W / 2, 23);
+  ctx.textAlign = 'right';
+  let hearts = '';
+  for (let i = 0; i < 3; i++) hearts += i < state.lives ? '♥ ' : '♡ ';
+  ctx.fillStyle = '#ff5c8a'; ctx.fillText(hearts, W - 16, 23);
+  ctx.textAlign = 'left';
+
+  if (state.over) {
+    ctx.fillStyle = 'rgba(10, 10, 30, 0.78)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 52px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(state.won ? 'YOU WIN!' : 'GAME OVER', W / 2, H / 2 - 30);
+    ctx.font = '28px system-ui, sans-serif'; ctx.fillStyle = '#ffd166';
+    ctx.fillText('Final score: ' + state.score, W / 2, H / 2 + 30);
+    ctx.font = '20px system-ui, sans-serif'; ctx.fillStyle = '#cfcfe8';
+    ctx.fillText('Press R to play again', W / 2, H / 2 + 70);
+    ctx.textAlign = 'left';
+  }
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw(now / 1000);
+  requestAnimationFrame(loop);
+}
+addEventListener('keydown', e => {
+  state.keys[e.key] = true;
+  if (e.key === 'r' || e.key === 'R') location.reload();
+  if (e.key === 'd' || e.key === 'D') state.demo = !state.demo;
+  if (e.key.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => { state.keys[e.key] = false; });
+if (new URLSearchParams(location.search).has('demo')) state.demo = true;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
